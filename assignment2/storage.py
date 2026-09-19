@@ -39,11 +39,20 @@ class Backup(Simulation):
     def __init__(self, nodes: List['Node']):
         super().__init__()  # call the __init__ method of parent class
         self.nodes = nodes
+        self.data_loss_nodes: set['Node'] = set()
 
         # we add to the event queue the first event of each node going online and of failing
         for node in nodes:
             self.schedule(node.arrival_time, Online(node))
             self.schedule(node.arrival_time + exp_rv(node.average_lifetime), Fail(node))
+
+    def check_data_loss(self, node: 'Node'):
+        """Check if node has suffered unrecoverable data loss (fewer than k blocks in the network)."""
+        if node.n > 0 and node.k > 0 and node.failed:
+            surviving = sum(peer is not None for peer in node.backed_up_blocks)
+            if surviving < node.k and node not in self.data_loss_nodes:
+                self.data_loss_nodes.add(node)
+                self.log_info(f"DATA LOSS: {node} has lost data ({surviving}/{node.k} blocks remaining in network)")
 
     def schedule_transfer(self, uploader: 'Node', downloader: 'Node', block_id: int, restore: bool):
         """Helper function called by `Node.schedule_next_upload` and `Node.schedule_next_download`.
@@ -143,8 +152,8 @@ class Node:
         # find a block that we have locally but not remotely
         # check `enumerate` and `zip`at https://docs.python.org/3/library/functions.html
         for block_id, (held_locally, peer) in enumerate(zip(self.local_blocks, self.backed_up_blocks)):
-            if ... and ... is None:
-                return ...
+            if held_locally and peer is None:
+                return block_id
         return None
 
     def schedule_next_upload(self, sim: Backup):
@@ -159,8 +168,8 @@ class Node:
         for peer, block_id in shuffled(self.remote_blocks_held.items()):
             # if the block is not present locally and the peer is online and not downloading anything currently, then
             # schedule the restore from self to peer of block_id
-            if ... and ... is None and not peer.local_blocks[block_id]:
-                ...
+            if peer.online and peer.current_download is None and not peer.local_blocks[block_id]:
+                sim.schedule_transfer(uploader=self, downloader=peer, block_id=block_id, restore=True)
                 return  # we have found our upload, we stop
 
         # try to back up a block on a locally held remote node
@@ -172,9 +181,9 @@ class Node:
         for peer in shuffled(sim.nodes):
             # if the peer is not self, is online, is not among the remote owners, has enough space and is not
             # downloading anything currently, schedule the backup of block_id from self to peer
-            if (peer is not self and ... and peer not in ... and peer.current_download is None
-                    and peer.free_space >= ...):
-                ...
+            if (peer is not self and peer.online and peer not in remote_owners and peer.current_download is None
+                    and peer.free_space >= self.block_size):
+                sim.schedule_transfer(uploader=self, downloader=peer, block_id=block_id, restore=False)
                 return
 
     def schedule_next_download(self, sim: Backup):
@@ -189,17 +198,17 @@ class Node:
 
         # first find if we have a missing block to restore
         for block_id, (held_locally, peer) in shuffled(enumerate(zip(self.local_blocks, self.backed_up_blocks))):
-            if not ... and peer is not None and ... and ... is None:
-                ...
+            if not held_locally and peer is not None and peer.online and peer.current_upload is None:
+                sim.schedule_transfer(uploader=peer, downloader=self, block_id=block_id, restore=True)
                 return  # we are done in this case
 
         # try to back up a block for a remote node
         for peer in shuffled(sim.nodes):
-            if (peer is not self and ... and ... is None and peer not in ...
-                    and self.free_space >= ...):
+            if (peer is not self and peer.online and peer.current_upload is None and peer not in self.remote_blocks_held
+                    and self.free_space >= peer.block_size):
                 block_id = peer.find_block_to_back_up()
                 if block_id is not None:
-                    ...
+                    sim.schedule_transfer(uploader=peer, downloader=self, block_id=block_id, restore=False)
                     return
 
     def __hash__(self):
@@ -235,10 +244,10 @@ class Online(NodeEvent):
             return
         node.online = True
         # schedule next upload and download
-        ...
-        ...
+        node.schedule_next_upload(sim)
+        node.schedule_next_download(sim)
         # schedule the next offline event
-        ...
+        sim.schedule(exp_rv(node.average_uptime), Offline(node))
 
 
 class Recover(Online):
@@ -297,9 +306,11 @@ class Fail(Disconnection):
         node = self.node
         node.failed = True
         node.local_blocks = [False] * node.n  # lose all local data
+        sim.check_data_loss(node)
         # lose all remote data
         for owner, block_id in node.remote_blocks_held.items():
             owner.backed_up_blocks[block_id] = None
+            sim.check_data_loss(owner)
             if owner.online and owner.current_upload is None:
                 owner.schedule_next_upload(sim)  # this node may want to back up the missing block
         node.remote_blocks_held.clear()
@@ -356,7 +367,7 @@ class BlockRestoreComplete(TransferComplete):
         owner = self.downloader
         owner.local_blocks[self.block_id] = True
         if sum(owner.local_blocks) == owner.k:  # we have exactly k local blocks, we have all of them then
-            ...
+            owner.local_blocks = [True] * owner.n
 
 
 def main():
@@ -382,7 +393,7 @@ def main():
         ('arrival_time', parse_timespan)
     ]
 
-    config = configparser.ConfigParser()
+    config = configparser.ConfigParser(inline_comment_prefixes=('#', ';'))
     config.read(args.config)
     nodes = []  # we build the list of nodes to pass to the Backup class
     for node_class in config.sections():
@@ -394,6 +405,14 @@ def main():
     sim = Backup(nodes)
     sim.run(parse_timespan(args.max_t))
     sim.log_info(f"Simulation over")
+
+    nodes_with_data = [n for n in nodes if n.n > 0]
+    print(f"Simulation finished at t = {format_timespan(sim.t)}")
+    print(f"Total nodes: {len(nodes)}")
+    print(f"Nodes with data: {len(nodes_with_data)}")
+    print(f"Nodes that lost data: {len(sim.data_loss_nodes)}")
+    if nodes_with_data:
+        print(f"Data loss ratio: {len(sim.data_loss_nodes) / len(nodes_with_data):.2%}")
 
 
 if __name__ == '__main__':
