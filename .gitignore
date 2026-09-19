@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables
+.env
+.env.*
+
+# Generated plot / output files
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.out
+*.dat
+*.log
+
+# Distribution / Archives
+*.zip
+*.tar.*
+*.tar
+*.gz
+
+# OS / Editor artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
